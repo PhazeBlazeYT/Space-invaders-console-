@@ -1,0 +1,647 @@
+(() => {
+  // Prevent duplicate injection
+  const existing = document.getElementById('si-win');
+  if (existing) {
+    existing.style.display = 'block';
+    return;
+  }
+
+  const style = document.createElement('style');
+  style.textContent = `
+    #si-win {
+      position: fixed;
+      left: 24px;
+      top: 24px;
+      width: min(92vw, 900px);
+      height: min(82vh, 680px);
+      border: 2px solid #00ff00;
+      background: #000;
+      z-index: 2147483647;
+      font-family: 'Courier New', monospace;
+      box-shadow: 0 0 16px rgba(0, 255, 0, 0.45);
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+    }
+
+    #si-header {
+      background: #00ff00;
+      padding: 8px 15px;
+      display: flex;
+      justify-content: space-between;
+      color: #000;
+      font-weight: bold;
+      cursor: move;
+      align-items: center;
+      letter-spacing: 0.4px;
+    }
+
+    #si-stats {
+      background: #000;
+      padding: 8px 15px;
+      display: flex;
+      justify-content: space-between;
+      color: #00ff00;
+      font-size: 14px;
+      border-bottom: 2px solid #00ff00;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    #si-container {
+      flex-grow: 1;
+      position: relative;
+      background: #000;
+      overflow: hidden;
+    }
+
+    #si-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      image-rendering: pixelated;
+    }
+
+    #si-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.92);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #00ff00;
+      z-index: 10;
+      text-align: center;
+      padding: 20px;
+      gap: 8px;
+    }
+
+    .si-btn {
+      background: #00ff00;
+      color: #000;
+      border: none;
+      padding: 12px 25px;
+      border-radius: 3px;
+      cursor: pointer;
+      margin-top: 15px;
+      font-weight: bold;
+      font-size: 16px;
+      font-family: inherit;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const win = document.createElement('div');
+  win.id = 'si-win';
+
+  const header = document.createElement('div');
+  header.id = 'si-header';
+  const title = document.createTextNode('🚀 SPACE INVADERS - ARCADE EDITION');
+  const closeBtn = document.createElement('span');
+  closeBtn.textContent = '✖';
+  closeBtn.style.cursor = 'pointer';
+  closeBtn.title = 'Close';
+  header.append(title, closeBtn);
+
+  const stats = document.createElement('div');
+  stats.id = 'si-stats';
+  const scoreVal = document.createElement('span');
+  const hiVal = document.createElement('span');
+  const livesVal = document.createElement('span');
+  const levelVal = document.createElement('span');
+  stats.append(scoreVal, hiVal, livesVal, levelVal);
+
+  const container = document.createElement('div');
+  container.id = 'si-container';
+  const canvas = document.createElement('canvas');
+  canvas.id = 'si-canvas';
+
+  const overlay = document.createElement('div');
+  overlay.id = 'si-overlay';
+  const overlayTitle = document.createElement('h2');
+  const overlayInfo = document.createElement('div');
+  const startBtn = document.createElement('button');
+  startBtn.className = 'si-btn';
+  startBtn.textContent = 'START GAME';
+  overlay.append(overlayTitle, overlayInfo, startBtn);
+
+  container.append(canvas, overlay);
+  win.append(header, stats, container);
+  document.body.appendChild(win);
+
+  const ctx = canvas.getContext('2d');
+  let raf = null;
+  let paused = true;
+  let canShoot = true;
+  let keys = {};
+
+  const state = {
+    score: 0,
+    highScore: Number(localStorage.getItem('si_highscore') || 0),
+    lives: 3,
+    level: 1,
+    gameOver: false,
+    player: { x: 0, y: 0, w: 34, h: 18, speed: 5 },
+    playerBullet: null,
+    enemies: [],
+    enemyBullets: [],
+    barriers: [],
+    fleetDir: 1,
+    fleetSpeed: 1,
+    fleetStepTick: 0,
+    fleetDrop: 14,
+    lastTime: 0,
+    enemyShootTimer: 0,
+    ufo: null,
+    ufoTimer: 0,
+    invaderAnim: 0,
+    respawnTimer: 0,
+  };
+
+  const ENEMY_ROWS = 5;
+  const ENEMY_COLS = 11;
+  const enemyPoints = [30, 20, 20, 10, 10];
+
+  function resizeCanvas() {
+    const w = Math.max(680, container.clientWidth);
+    const h = Math.max(420, container.clientHeight);
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  function resetPlayer() {
+    state.player.x = canvas.width / 2 - state.player.w / 2;
+    state.player.y = canvas.height - 52;
+    state.playerBullet = null;
+    state.respawnTimer = 45;
+  }
+
+  function createFleet() {
+    state.enemies = [];
+    const spacingX = 48;
+    const spacingY = 36;
+    const startX = 80;
+    const startY = 70;
+
+    for (let row = 0; row < ENEMY_ROWS; row++) {
+      for (let col = 0; col < ENEMY_COLS; col++) {
+        state.enemies.push({
+          x: startX + col * spacingX,
+          y: startY + row * spacingY,
+          w: 28,
+          h: 20,
+          row,
+          col,
+          alive: true,
+        });
+      }
+    }
+
+    state.fleetDir = 1;
+    state.fleetSpeed = 1 + (state.level - 1) * 0.2;
+    state.fleetStepTick = 0;
+    state.enemyBullets = [];
+  }
+
+  function createBarriers() {
+    state.barriers = [];
+    const count = 4;
+    const blockW = 8;
+    const blockH = 6;
+    const pattern = [
+      '0011111100',
+      '0111111110',
+      '1111111111',
+      '1111001111',
+      '1100000011',
+    ];
+
+    const totalWidth = count * (pattern[0].length * blockW) + (count - 1) * 70;
+    let startX = (canvas.width - totalWidth) / 2;
+
+    for (let i = 0; i < count; i++) {
+      const bx = startX + i * ((pattern[0].length * blockW) + 70);
+      const by = canvas.height - 145;
+
+      for (let r = 0; r < pattern.length; r++) {
+        for (let c = 0; c < pattern[r].length; c++) {
+          if (pattern[r][c] === '1') {
+            state.barriers.push({
+              x: bx + c * blockW,
+              y: by + r * blockH,
+              w: blockW,
+              h: blockH,
+              hp: 3,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  function fullReset() {
+    state.score = 0;
+    state.lives = 3;
+    state.level = 1;
+    state.gameOver = false;
+    state.ufo = null;
+    state.ufoTimer = 360;
+    resetPlayer();
+    createFleet();
+    createBarriers();
+    updateStats();
+  }
+
+  function levelReset() {
+    state.ufo = null;
+    state.ufoTimer = 220;
+    resetPlayer();
+    createFleet();
+    createBarriers();
+    updateStats();
+  }
+
+  function updateStats() {
+    scoreVal.textContent = `SCORE: ${state.score.toString().padStart(4, '0')}`;
+    hiVal.textContent = `HI-SCORE: ${state.highScore.toString().padStart(4, '0')}`;
+    livesVal.textContent = `LIVES: ${'▮'.repeat(Math.max(0, state.lives)) || '0'}`;
+    levelVal.textContent = `LEVEL: ${state.level}`;
+  }
+
+  function openOverlay(titleText, infoText, buttonText) {
+    overlayTitle.textContent = titleText;
+    overlayInfo.textContent = infoText;
+    startBtn.textContent = buttonText;
+    overlay.style.display = 'flex';
+    paused = true;
+  }
+
+  function closeOverlay() {
+    overlay.style.display = 'none';
+    paused = false;
+  }
+
+  function aabb(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function damageBarrier(rect) {
+    for (let i = state.barriers.length - 1; i >= 0; i--) {
+      const block = state.barriers[i];
+      if (aabb(rect, block)) {
+        block.hp -= 1;
+        if (block.hp <= 0) state.barriers.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function firePlayerBullet() {
+    if (!canShoot || paused || state.respawnTimer > 0 || state.playerBullet) return;
+    state.playerBullet = {
+      x: state.player.x + state.player.w / 2 - 2,
+      y: state.player.y - 10,
+      w: 4,
+      h: 12,
+      vy: -8,
+    };
+    canShoot = false;
+  }
+
+  function fireEnemyBullet() {
+    const alive = state.enemies.filter(e => e.alive);
+    if (!alive.length) return;
+
+    const byCol = new Map();
+    for (const e of alive) {
+      const prev = byCol.get(e.col);
+      if (!prev || e.y > prev.y) byCol.set(e.col, e);
+    }
+
+    const shooters = Array.from(byCol.values());
+    const shooter = shooters[Math.floor(Math.random() * shooters.length)];
+    state.enemyBullets.push({
+      x: shooter.x + shooter.w / 2 - 2,
+      y: shooter.y + shooter.h,
+      w: 4,
+      h: 10,
+      vy: 4 + Math.min(3, state.level * 0.35),
+    });
+  }
+
+  function addScore(points) {
+    state.score += points;
+    if (state.score > state.highScore) {
+      state.highScore = state.score;
+      localStorage.setItem('si_highscore', String(state.highScore));
+    }
+    updateStats();
+  }
+
+  function loseLife() {
+    if (state.respawnTimer > 0) return;
+    state.lives -= 1;
+    updateStats();
+    if (state.lives <= 0) {
+      state.gameOver = true;
+      openOverlay('GAME OVER', 'Earth has fallen. Press start to try again.', 'RESTART');
+      return;
+    }
+    resetPlayer();
+  }
+
+  function update(dt) {
+    if (paused) return;
+
+    state.invaderAnim += dt * 0.01;
+
+    if (keys.ArrowLeft || keys.a) {
+      state.player.x -= state.player.speed;
+    }
+    if (keys.ArrowRight || keys.d) {
+      state.player.x += state.player.speed;
+    }
+    state.player.x = Math.max(12, Math.min(canvas.width - state.player.w - 12, state.player.x));
+
+    if (state.respawnTimer > 0) state.respawnTimer -= 1;
+
+    if (state.playerBullet) {
+      state.playerBullet.y += state.playerBullet.vy;
+      if (state.playerBullet.y + state.playerBullet.h < 0) state.playerBullet = null;
+      else if (damageBarrier(state.playerBullet)) state.playerBullet = null;
+    }
+
+    // UFO spawn and movement
+    state.ufoTimer -= 1;
+    if (!state.ufo && state.ufoTimer <= 0) {
+      const fromLeft = Math.random() > 0.5;
+      state.ufo = {
+        x: fromLeft ? -46 : canvas.width + 46,
+        y: 42,
+        w: 42,
+        h: 18,
+        vx: fromLeft ? 2.3 : -2.3,
+      };
+      state.ufoTimer = 520 + Math.random() * 260;
+    }
+    if (state.ufo) {
+      state.ufo.x += state.ufo.vx;
+      if (state.ufo.x < -60 || state.ufo.x > canvas.width + 60) state.ufo = null;
+    }
+
+    // Fleet movement step timing (speeds up as enemies die)
+    const aliveEnemies = state.enemies.filter(e => e.alive);
+    const aliveCount = aliveEnemies.length;
+    const stepEvery = Math.max(5, 32 - Math.floor((ENEMY_ROWS * ENEMY_COLS - aliveCount) * 0.45) - (state.level - 1));
+    state.fleetStepTick += 1;
+
+    if (state.fleetStepTick >= stepEvery) {
+      state.fleetStepTick = 0;
+
+      const minX = Math.min(...aliveEnemies.map(e => e.x));
+      const maxX = Math.max(...aliveEnemies.map(e => e.x + e.w));
+      if (maxX >= canvas.width - 16 || minX <= 16) {
+        state.fleetDir *= -1;
+        aliveEnemies.forEach(e => { e.y += state.fleetDrop; });
+      } else {
+        aliveEnemies.forEach(e => { e.x += state.fleetDir * (8 + state.level * 0.25); });
+      }
+    }
+
+    // Enemy fire timing
+    state.enemyShootTimer -= dt;
+    if (state.enemyShootTimer <= 0 && aliveCount) {
+      fireEnemyBullet();
+      const cadence = Math.max(260, 780 - state.level * 55 - (55 - aliveCount) * 4);
+      state.enemyShootTimer = cadence;
+    }
+
+    // Enemy bullets
+    for (let i = state.enemyBullets.length - 1; i >= 0; i--) {
+      const b = state.enemyBullets[i];
+      b.y += b.vy;
+      if (b.y > canvas.height) {
+        state.enemyBullets.splice(i, 1);
+        continue;
+      }
+      if (damageBarrier(b)) {
+        state.enemyBullets.splice(i, 1);
+        continue;
+      }
+      if (state.respawnTimer <= 0 && aabb(b, state.player)) {
+        state.enemyBullets.splice(i, 1);
+        loseLife();
+      }
+    }
+
+    // Player bullet collisions
+    if (state.playerBullet) {
+      // UFO
+      if (state.ufo && aabb(state.playerBullet, state.ufo)) {
+        addScore([50, 100, 150, 200][Math.floor(Math.random() * 4)]);
+        state.ufo = null;
+        state.playerBullet = null;
+      }
+
+      // Enemies
+      if (state.playerBullet) {
+        for (const e of aliveEnemies) {
+          if (aabb(state.playerBullet, e)) {
+            e.alive = false;
+            addScore(enemyPoints[e.row] ?? 10);
+            state.playerBullet = null;
+            break;
+          }
+        }
+      }
+
+      // Enemy bullets hit
+      if (state.playerBullet) {
+        for (let i = state.enemyBullets.length - 1; i >= 0; i--) {
+          if (aabb(state.playerBullet, state.enemyBullets[i])) {
+            state.enemyBullets.splice(i, 1);
+            state.playerBullet = null;
+            break;
+          }
+        }
+      }
+    }
+
+    // Lose condition: invaders touch player line
+    const breachLine = canvas.height - 70;
+    if (aliveEnemies.some(e => e.y + e.h >= breachLine)) {
+      state.lives = 0;
+      updateStats();
+      state.gameOver = true;
+      openOverlay('GAME OVER', 'Invaders reached Earth. Press start to retry.', 'RESTART');
+      return;
+    }
+
+    // Win wave
+    if (!state.enemies.some(e => e.alive)) {
+      state.level += 1;
+      openOverlay(`WAVE ${state.level - 1} CLEARED`, `Prepare for wave ${state.level}.`, 'CONTINUE');
+      levelReset();
+      return;
+    }
+  }
+
+  function drawEnemy(e) {
+    const phase = Math.floor(state.invaderAnim) % 2;
+    const x = e.x;
+    const y = e.y;
+
+    if (e.row === 0) {
+      ctx.fillRect(x + 8, y, 12, 4);
+      ctx.fillRect(x + 4, y + 4, 20, 4);
+      ctx.fillRect(x, y + 8, 8, 4);
+      ctx.fillRect(x + 20, y + 8, 8, 4);
+      ctx.fillRect(x + 4, y + 12, 20, 4);
+      ctx.fillRect(x + (phase ? 2 : 6), y + 16, 4, 4);
+      ctx.fillRect(x + (phase ? 22 : 18), y + 16, 4, 4);
+    } else if (e.row < 3) {
+      ctx.fillRect(x + 8, y, 12, 4);
+      ctx.fillRect(x + 4, y + 4, 20, 4);
+      ctx.fillRect(x, y + 8, 28, 4);
+      ctx.fillRect(x + 4, y + 12, 20, 4);
+      ctx.fillRect(x + (phase ? 0 : 6), y + 16, 4, 4);
+      ctx.fillRect(x + (phase ? 24 : 18), y + 16, 4, 4);
+    } else {
+      ctx.fillRect(x + 6, y, 16, 4);
+      ctx.fillRect(x + 2, y + 4, 24, 4);
+      ctx.fillRect(x, y + 8, 28, 4);
+      ctx.fillRect(x + 4, y + 12, 20, 4);
+      ctx.fillRect(x + (phase ? 4 : 0), y + 16, 4, 4);
+      ctx.fillRect(x + (phase ? 20 : 24), y + 16, 4, 4);
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Ground line
+    ctx.fillStyle = '#00ff00';
+    ctx.fillRect(0, canvas.height - 26, canvas.width, 2);
+
+    // Barriers
+    for (const b of state.barriers) {
+      ctx.fillStyle = b.hp === 3 ? '#00ff00' : b.hp === 2 ? '#7CFC00' : '#5ca45c';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    }
+
+    // Player
+    if (state.respawnTimer <= 0 || Math.floor(state.respawnTimer / 4) % 2 === 0) {
+      ctx.fillStyle = '#00ff00';
+      const p = state.player;
+      ctx.fillRect(p.x + 10, p.y, 14, 6);
+      ctx.fillRect(p.x + 6, p.y + 6, 22, 6);
+      ctx.fillRect(p.x, p.y + 12, 34, 6);
+    }
+
+    // Enemies
+    ctx.fillStyle = '#ff00ff';
+    for (const e of state.enemies) {
+      if (!e.alive) continue;
+      drawEnemy(e);
+    }
+
+    // UFO
+    if (state.ufo) {
+      const u = state.ufo;
+      ctx.fillStyle = '#ff2e2e';
+      ctx.fillRect(u.x + 8, u.y, 26, 5);
+      ctx.fillRect(u.x + 4, u.y + 5, 34, 6);
+      ctx.fillRect(u.x, u.y + 11, 42, 7);
+    }
+
+    // Bullets
+    if (state.playerBullet) {
+      ctx.fillStyle = '#fff';
+      const b = state.playerBullet;
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    }
+
+    ctx.fillStyle = '#f5d142';
+    for (const b of state.enemyBullets) {
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    }
+  }
+
+  function tick(t) {
+    if (!state.lastTime) state.lastTime = t;
+    const dt = Math.min(32, t - state.lastTime);
+    state.lastTime = t;
+
+    update(dt);
+    draw();
+    raf = requestAnimationFrame(tick);
+  }
+
+  function startGame() {
+    if (state.gameOver) {
+      fullReset();
+    }
+    closeOverlay();
+  }
+
+  // Input
+  window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    if ((e.key === ' ' || e.key === 'Spacebar') && !paused) {
+      firePlayerBullet();
+      e.preventDefault();
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    keys[e.key] = false;
+    if (e.key === ' ') canShoot = true;
+  });
+
+  startBtn.onclick = startGame;
+  closeBtn.onclick = () => {
+    win.style.display = 'none';
+    paused = true;
+    if (raf) cancelAnimationFrame(raf);
+  };
+
+  // Dragging
+  let isDragging = false;
+  let offX = 0;
+  let offY = 0;
+  header.onmousedown = (e) => {
+    if (e.target === closeBtn) return;
+    isDragging = true;
+    offX = win.offsetLeft - e.clientX;
+    offY = win.offsetTop - e.clientY;
+  };
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    win.style.left = `${e.clientX + offX}px`;
+    win.style.top = `${e.clientY + offY}px`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    isDragging = false;
+  });
+
+  resizeCanvas();
+  window.addEventListener('resize', () => {
+    const oldW = canvas.width;
+    resizeCanvas();
+    const ratio = canvas.width / oldW;
+    state.player.x *= ratio;
+    for (const e of state.enemies) e.x *= ratio;
+    for (const b of state.barriers) b.x *= ratio;
+  });
+
+  fullReset();
+  openOverlay('SPACE INVADERS', 'Move: ← → / A D • Fire: SPACE', 'START GAME');
+
+  if (raf) cancelAnimationFrame(raf);
+  raf = requestAnimationFrame(tick);
+})();
